@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [KSU-AOSP, KSU-OEM, Non-KSU]
+        build_type: [KSU-AOSP]
 
     steps:
       - name: 🔄 Checkout Code
