@@ -204,30 +204,7 @@ jobs:
             apply_panel_dimensions 695 1546
         fi
 
-    - name: 📨 Notify - Build Kernel Started
-      continue-on-error: true
-      shell: bash
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: |
-        if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-          echo "Secret Telegram belum diset, notifikasi dilewati."
-          exit 0
-        fi
-
-        TEXT="🛠️ *Reforge Kernel — Build Started*
-        📱 Device: \`${DEVICE_CODENAME}\`
-        📅 Build date: \`${BUILD_DATE}\`
-        ⚙️ Compiler: \`${COMPILER}\`
-        📦 Build type: \`${BUILD_TYPE}\`
-        👤 By: \`${ACTOR}\`"
-
-        curl -sS --fail-with-body -X POST \
-          "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-          --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-          --data-urlencode parse_mode="Markdown" \
-          --data-urlencode text="$TEXT" > /dev/null
+    
 
     - name: 🛠️ Build Kernel
       id: build
