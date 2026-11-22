@@ -2,7 +2,9 @@ name: Start Reforge
 
 on:
   workflow_dispatch:
-  
+  push:
+    branches:
+      - '**'
     inputs:
       build_type:
         description: 'Select Build Type'
