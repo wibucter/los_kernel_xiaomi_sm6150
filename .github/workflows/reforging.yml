@@ -2,6 +2,7 @@ name: Start Reforge
 
 on:
   workflow_dispatch:
+  
     inputs:
       build_type:
         description: 'Select Build Type'
