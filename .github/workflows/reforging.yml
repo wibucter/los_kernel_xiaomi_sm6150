@@ -1,115 +1,337 @@
-name: Reforging
+name: Start Reforge
 
 on:
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Select Build Type'
+        required: true
+        default: 'MIUI-OOS'
+        type: choice
+        options:
+          - MIUI-OOS
+          - AOSP
+
+      compiler:
+        description: 'Select Compiler'
+        required: true
+        default: 'AOSP-Clang'
+        type: choice
+        options:
+          - AOSP-Clang
+          - Neutron-Clang
+
+# Token bawaan GitHub hanya boleh baca isi repo
+permissions:
+  contents: read
+
+# Jangan jalankan dua build bersamaan di branch yang sama
+concurrency:
+  group: reforge-${{ github.ref }}
+  cancel-in-progress: false
+
+# Sengaja TIDAK ada secret di level workflow/job.
+# Secret Telegram hanya dipasang di step notifikasi (lihat env masing-masing step),
+# supaya script pihak ketiga (NoMount, KernelSU) dan proses build tidak bisa membacanya.
+env:
+  DEVICE_CODENAME: "sweet2"
+  # Input dilempar lewat env, bukan di-inline ke script shell (cegah injection)
+  BUILD_TYPE: ${{ github.event.inputs.build_type }}
+  COMPILER: ${{ github.event.inputs.compiler }}
+  REF_NAME: ${{ github.ref_name }}
+  ACTOR: ${{ github.actor }}
 
 jobs:
   Reforging:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [KSU-AOSP]
+    timeout-minutes: 180
 
     steps:
-      - name: 🔄 Checkout Code
-        uses: actions/checkout@v7
+    - name: 🔄 Checkout Code
+      uses: actions/checkout@v5
+      with:
+        submodules: recursive
+        fetch-depth: 1
+        persist-credentials: false
 
-      - name: ⏰ Prepare Environment
-        run: |
-          sudo ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
-          sudo apt update -y
-          sudo apt install -y bc cpio flex bison git python-is-python3 tar aria2 perl wget curl lz4 libssl-dev
+    - name: ⏰ Prepare timezone
+      run: |
+        sudo ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
 
-          mkdir clang
-          cd clang
-          curl -LO https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman
-          chmod +x antman
-          ./antman -S
-          ./antman --patch=glibc
-          cd ..
+    # PERHATIAN: dua step di bawah menjalankan script dari internet (branch bergerak).
+    # Idealnya ganti "refs/heads/..." / "main" dengan commit SHA yang sudah kamu cek isinya.
+    - name: 🥷 Implant NoMount
+      run: curl -fLSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -
 
-          git clone --depth=1 -b main https://github.com/greenforce-project/gcc-arm64 gcc64
-          git clone --depth=1 -b main https://github.com/greenforce-project/gcc-arm gcc32
+    - name: 📥 Setup KernelSU
+      run: curl -fLSs "https://raw.githubusercontent.com/manipvlator/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
 
-          echo "BUILD_TIME=$(TZ=Asia/Jakarta date '+%d%m%Y-%H%M')" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=\"$(TZ=Asia/Jakarta date '+%b %d %Y')\"" >> "$GITHUB_ENV"
-          echo "BUILD_REF=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
-          echo "CLANG_PATH=$GITHUB_WORKSPACE/clang" >> "$GITHUB_ENV"
-          echo "GCC64_PATH=$GITHUB_WORKSPACE/gcc64" >> "$GITHUB_ENV"
-          echo "GCC32_PATH=$GITHUB_WORKSPACE/gcc32" >> "$GITHUB_ENV"
+    - name: 📦 Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          bc \
+          cpio \
+          flex \
+          bison \
+          git \
+          python-is-python3 \
+          tar \
+          aria2 \
+          perl \
+          wget \
+          curl \
+          lz4 \
+          libssl-dev \
+          libelf-dev \
+          dwarves \
+          zip \
+          zstd
 
-      - name: 🥷 Setup NoMount
-        run: curl -LSs https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/master/kernel/setup.sh | bash -s master
+    - name: ⚙️ Setup Environment
+      shell: bash
+      run: |
+        set -e
+        BUILD_TIME="$(TZ=Asia/Jakarta date '+%d%m%Y-%H%M')"
+        # Nama branch bisa mengandung "/" atau karakter aneh, rapikan untuk nama file
+        SAFE_REF="$(printf '%s' "$REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"
+        # Label di nama zip: AOSP untuk build AOSP, OEM untuk build MIUI-OOS
+        if [[ "$BUILD_TYPE" == "AOSP" ]]; then
+          TYPE_TAG="AOSP"
+        else
+          TYPE_TAG="OEM"
+        fi
+        {
+          echo "BUILD_TIME=$BUILD_TIME"
+          echo "BUILD_DATE=$(TZ=Asia/Jakarta date '+%b %d %Y')"
+          echo "ARTIFACT_NAME=Reforge-sweet2-${TYPE_TAG}-${SAFE_REF}-${BUILD_TIME}"
+        } >> "$GITHUB_ENV"
 
-      - name: 📥 Setup KernelSU
-        if: matrix.build_type == 'KSU-AOSP' || matrix.build_type == 'KSU-OEM'
-        run: curl -LSs https://raw.githubusercontent.com/LyraVoid/FinaSU/refs/heads/master/kernel/setup.sh | bash -s main
+    - name: 🔧 Setup Compiler
+      id: compiler
+      shell: bash
+      run: |
+        set -euo pipefail
 
-      - name: 📐 OEM Dimension
-        if: matrix.build_type == 'KSU-OEM'
-        run: |
-          DTS=arch/arm64/boot/dts/qcom/xiaomi/sweet/dsi-panel-k6-38-0c-0a-fhd-dsc-video.dtsi
-          sed -i \
-            -e 's/qcom,mdss-pan-physical-width-dimension = <69>;/qcom,mdss-pan-physical-width-dimension = <695>;/' \
-            -e 's/qcom,mdss-pan-physical-height-dimension = <154>;/qcom,mdss-pan-physical-height-dimension = <1546>;/' \
-            "$DTS"
+        mkdir -p clang
 
-      - name: 🛠️ Build Kernel
-        run: |
-          export PATH="$CLANG_PATH/bin:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
-          export KBUILD_BUILD_USER=Manipulator
-          export KBUILD_BUILD_HOST=LineageOS
-          export KBUILD_COMPILER_STRING="Neutron clang version 24.0.0"
-          export CFLAGS_EXTRA="-DBUILD_DATE=$BUILD_DATE"
+        if [[ "$COMPILER" == "Neutron-Clang" ]]; then
 
-          make O=out ARCH=arm64 vendor/sweet_defconfig
-          make -j"$(nproc --all)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang \
-            CLANG_TRIPLE="$CLANG_PATH/aarch64-linux-gnu-" \
-            CROSS_COMPILE="$GCC64_PATH/bin/aarch64-elf-" \
-            CROSS_COMPILE_ARM32="$GCC32_PATH/bin/arm-eabi-"
+          echo "Using Neutron Clang"
 
-          cp out/.config out/sweet_defconfig.txt
+          CLANG_URL=$(
+            curl -fsSL \
+              https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest |
+            grep "browser_download_url" |
+            grep "neutron-clang" |
+            head -n 1 |
+            cut -d '"' -f 4
+          )
 
-      - name: 💾 Upload Config
-        uses: actions/upload-artifact@v7
-        with:
-          name: configs-${{ matrix.build_type }}-${{ env.BUILD_TIME }}
-          path: out/sweet_defconfig.txt
+          [[ -n "$CLANG_URL" ]] || { echo "❌ URL Neutron Clang tidak ditemukan"; exit 1; }
 
-      - name: 📦 Build 90Hz DTBO
-        run: |
-          cp out/arch/arm64/boot/dtb.img "$RUNNER_TEMP/dtb-stock.img"
-          cp out/arch/arm64/boot/dtbo.img "$RUNNER_TEMP/dtbo-stock.img"
+          echo "Downloading:"
+          echo "$CLANG_URL"
 
-          git apply arch/arm64/boot/dts/qcom/xiaomi/sweet/90hz-dtbo.patch
-          rm -rf out/arch/arm64/boot/dts out/arch/arm64/boot/dtb.img out/arch/arm64/boot/dtbo.img
+          curl -fL "$CLANG_URL" -o neutron-clang.tar.zst
+          tar -C clang -xf neutron-clang.tar.zst
+          rm -f neutron-clang.tar.zst
 
-          export PATH="$CLANG_PATH/bin:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
-          export KBUILD_BUILD_USER=Manipulator
-          export KBUILD_BUILD_HOST=LineageOS
-          export KBUILD_COMPILER_STRING="Neutron clang version 24.0.0"
-          export CFLAGS_EXTRA="-DBUILD_DATE=$BUILD_DATE"
+        else
 
-          make -j"$(nproc --all)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang \
-            CLANG_TRIPLE="$CLANG_PATH/aarch64-linux-gnu-" \
-            CROSS_COMPILE="$GCC64_PATH/bin/aarch64-elf-" \
-            CROSS_COMPILE_ARM32="$GCC32_PATH/bin/arm-eabi-"
+          echo "Using AOSP Clang"
 
-          cp out/arch/arm64/boot/dtbo.img "$RUNNER_TEMP/dtbo-90hz.img"
-          cp "$RUNNER_TEMP/dtb-stock.img" out/arch/arm64/boot/dtb.img
-          cp "$RUNNER_TEMP/dtbo-stock.img" out/arch/arm64/boot/dtbo.img
-          git apply -R arch/arm64/boot/dts/qcom/xiaomi/sweet/90hz-dtbo.patch
+          CLANG_URL=$(
+            curl -fsSL \
+              https://api.github.com/repos/bachnxuan/aosp_clang_mirror/releases/latest |
+            grep "browser_download_url" |
+            grep -E 'clang-.*\.tar\.gz' |
+            head -n 1 |
+            cut -d '"' -f 4
+          )
 
-      - name: 📂 Prepare AnyKernel3
-        run: |
-          git clone --depth=1 -b reforge https://github.com/manipvlator/Anykernel3.git AnyKernel3
-          cp out/arch/arm64/boot/{Image.gz,dtbo.img,dtb.img} AnyKernel3/
-          cp "$RUNNER_TEMP/dtbo-90hz.img" AnyKernel3/dtbo-90hz.img
-          (cd AnyKernel3 && zip -r "../reforge_${{ matrix.build_type }}-${BUILD_REF}-${BUILD_TIME}.zip" . -x ".git/*")
+          [[ -n "$CLANG_URL" ]] || { echo "❌ URL AOSP Clang tidak ditemukan"; exit 1; }
 
-      - name: 📤 Upload Flashable ZIP
-        uses: actions/upload-artifact@v7
-        with:
-          name: reforge_${{ matrix.build_type }}-${{ env.BUILD_REF }}-${{ env.BUILD_TIME }}
-          path: AnyKernel3/*
+          echo "Downloading:"
+          echo "$CLANG_URL"
+
+          curl -fL "$CLANG_URL" -o clang.tar.gz
+          tar -C clang -xf clang.tar.gz
+          rm -f clang.tar.gz
+
+        fi
+
+        echo "CLANG_PATH=$GITHUB_WORKSPACE/clang" >> "$GITHUB_ENV"
+
+        echo
+        echo "Compiler:"
+        "$GITHUB_WORKSPACE/clang/bin/clang" --version | head -n 1
+        "$GITHUB_WORKSPACE/clang/bin/ld.lld" --version | head -n 1
+
+    - name: 📱 Patch Panel Dimensions
+      shell: bash
+      run: |
+        set -e
+
+        apply_panel_dimensions() {
+            local w="$1"
+            local h="$2"
+
+            local files=(
+                "arch/arm64/boot/dts/qcom/xiaomi/sweet/dsi-panel-k6-38-0e-0b-fhd-dsc-video.dtsi"
+                "arch/arm64/boot/dts/qcom/xiaomi/sweet/dsi-panel-k6-38-0c-0a-fhd-dsc-video.dtsi"
+            )
+
+            for f in "${files[@]}"; do
+                if [[ -f "$f" ]]; then
+
+                    echo "Patching $f → ${w}x${h}"
+
+                    sed -i \
+                      "s/\(qcom,mdss-pan-physical-width-dimension[[:space:]]*=[[:space:]]*< *\)[0-9]\+/\1${w}/" \
+                      "$f"
+
+                    sed -i \
+                      "s/\(qcom,mdss-pan-physical-height-dimension[[:space:]]*=[[:space:]]*< *\)[0-9]\+/\1${h}/" \
+                      "$f"
+                fi
+            done
+        }
+
+        if [[ "$BUILD_TYPE" == "AOSP" ]]; then
+            apply_panel_dimensions 69 156
+        else
+            apply_panel_dimensions 695 1546
+        fi
+
+    - name: 📨 Notify - Build Kernel Started
+      continue-on-error: true
+      shell: bash
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+          echo "Secret Telegram belum diset, notifikasi dilewati."
+          exit 0
+        fi
+
+        TEXT="🛠️ *Reforge Kernel — Build Started*
+        📱 Device: \`${DEVICE_CODENAME}\`
+        📅 Build date: \`${BUILD_DATE}\`
+        ⚙️ Compiler: \`${COMPILER}\`
+        📦 Build type: \`${BUILD_TYPE}\`
+        👤 By: \`${ACTOR}\`"
+
+        curl -sS --fail-with-body -X POST \
+          "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
+          --data-urlencode parse_mode="Markdown" \
+          --data-urlencode text="$TEXT" > /dev/null
+
+    - name: 🛠️ Build Kernel
+      id: build
+      shell: bash
+      run: |
+        set -e
+
+        export ARCH=arm64
+        export SUBARCH=arm64
+
+        export KBUILD_BUILD_USER=Ghnkz
+        export KBUILD_BUILD_HOST=LineageOS
+
+        export PATH="$CLANG_PATH/bin:$PATH"
+
+        export LLVM=1
+        export LLVM_IAS=1
+
+        export CC=clang
+        export LD=ld.lld
+
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+
+        export KBUILD_COMPILER_STRING="$(clang --version | head -n1)"
+
+        echo "========================================="
+        echo "       Reforge Kernel Compilation"
+        echo "========================================="
+        echo "Build type : $BUILD_TYPE"
+        echo "Compiler   : $COMPILER"
+        echo "Date       : $BUILD_DATE"
+        echo "Jobs       : $(nproc --all)"
+        echo
+        clang --version | head -n1
+        echo "========================================="
+
+        make O=out ARCH=arm64 vendor/sweet_defconfig
+
+        make \
+          -j"$(nproc --all)" \
+          O=out \
+          ARCH=arm64
+
+        cp out/.config out/sweet_defconfig.txt
+
+    - name: ✅ Verify Kernel Build
+      id: verify
+      shell: bash
+      run: |
+        set -e
+
+        KERNEL="out/arch/arm64/boot/Image.gz"
+        DTBO="out/arch/arm64/boot/dtbo.img"
+        DTB="out/arch/arm64/boot/dtb.img"
+
+        failed=0
+
+        for file in "$KERNEL" "$DTBO" "$DTB"; do
+          if [[ ! -f "$file" ]]; then
+            echo "❌ Missing: $file"
+            failed=1
+          else
+            echo "✅ Found: $file"
+            ls -lh "$file"
+          fi
+        done
+
+        if [[ "$failed" -ne 0 ]]; then
+          echo "Kernel compilation failed."
+          exit 1
+        fi
+
+    - name: 💾 Upload configs
+      uses: actions/upload-artifact@v5
+      with:
+        name: configs-${{ env.BUILD_TIME }}
+        path: out/sweet_defconfig.txt
+
+    - name: 📂 Clone AnyKernel3 & Zip
+      shell: bash
+      run: |
+        set -e
+
+        git clone \
+          --depth=1 \
+          https://github.com/Naughty-stuff/anykernel3.git \
+          AnyKernel3
+
+        cp out/arch/arm64/boot/Image.gz AnyKernel3/Image.gz
+        cp out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
+        cp out/arch/arm64/boot/dtb.img AnyKernel3/dtb.img
+
+        cd AnyKernel3
+
+        zip -r9 \
+          "../${ARTIFACT_NAME}.zip" \
+          . \
+          -x ".git/*"
+
+    - name: 📤 Upload Flashable Zip
+      uses: actions/upload-artifact@v5
+      with:
+        name: ${{ env.ARTIFACT_NAME }}
+        path: ${{ env.ARTIFACT_NAME }}.zip
+
+    
