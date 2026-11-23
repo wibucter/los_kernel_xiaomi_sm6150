@@ -60,7 +60,7 @@ jobs:
       run: curl -fLSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -
 
     - name: 📥 Setup KernelSU
-      run: curl -fLSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s main
+      run: curl -fLSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s xxksu-susfs
 
     - name: 🔍 Verify SUSFS Integration
       shell: bash
