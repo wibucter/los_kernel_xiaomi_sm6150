@@ -64,7 +64,7 @@ jobs:
       run: curl -fLSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -
 
     - name: 📥 Setup KernelSU
-      run: curl -fLSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s main
+      run: curl -fLSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s master
 
     - name: 📦 Install Dependencies
       run: |
@@ -308,7 +308,6 @@ jobs:
     - name: 📤 Upload ZIP Artifact
       uses: actions/upload-artifact@v7
       with:
-          name: reforge_${{ matrix.build_type }}-${{ env.SAFE_REF }}-${{ env.BUILD_TIME }}
           path: AnyKernel3/*
 
     
