@@ -106,6 +106,7 @@ jobs:
           --enable KALLSYMS_ALL \
           --enable EXT4_FS \
           --enable HEADERS_INSTALL
+          make O=out ARCH=arm64 olddefconfig
           
 
       - name: 🔨 Build Kernel
