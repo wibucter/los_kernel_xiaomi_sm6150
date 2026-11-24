@@ -58,11 +58,6 @@ jobs:
         if: matrix.build_type == 'KSU-AOSP' || matrix.build_type == 'KSU-OEM'
         run: |
           curl -LSs https://raw.githubusercontent.com/LyraVoid/FinaSU/refs/heads/master/kernel/setup.sh | bash -s main
-          scripts/config --enable KSU
-          scripts/config --enable KPROBES
-          scripts/config --enable KALLSYMS_ALL
-          scripts/config --enable EXT4_FS
-          scripts/config --enable HEADERS_INSTALL
           curl -LSs https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -
 
       - name: 📱 Patch Panel Dimensions
@@ -103,7 +98,15 @@ jobs:
           fi
 
       - name: 🧩 Generate Defconfig
-        run: make O=out ARCH=arm64 vendor/sweet_defconfig
+        run: |
+          make O=out ARCH=arm64 vendor/sweet_defconfig
+          scripts/config --file out/.config \
+          --enable KPROBES \
+          --enable KSU \
+          --enable KALLSYMS_ALL \
+          --enable EXT4_FS \
+          --enable HEADERS_INSTALL
+          
 
       - name: 🔨 Build Kernel
         run: |
