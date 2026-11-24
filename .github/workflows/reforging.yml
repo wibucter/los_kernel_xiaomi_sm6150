@@ -1,463 +1,220 @@
-name: Start Reforge
+name: Reforging
 
 on:
   workflow_dispatch:
-    inputs:
-      build_type:
-        description: 'Select Build Type'
-        required: true
-        default: 'MIUI-OOS'
-        type: choice
-        options:
-          - MIUI-OOS
-          - AOSP
-
-      compiler:
-        description: 'Select Compiler'
-        required: true
-        default: 'AOSP-Clang'
-        type: choice
-        options:
-          - AOSP-Clang
-          - Neutron-Clang
-
-# Token bawaan GitHub hanya boleh baca isi repo
-permissions:
-  contents: read
-
-# Jangan jalankan dua build bersamaan di branch yang sama
-concurrency:
-  group: reforge-${{ github.ref }}
-  cancel-in-progress: false
-
-# Sengaja TIDAK ada secret di level workflow/job.
-# Secret Telegram hanya dipasang di step notifikasi (lihat env masing-masing step),
-# supaya script pihak ketiga (NoMount, KernelSU) dan proses build tidak bisa membacanya.
-env:
-  DEVICE_CODENAME: "sweet2"
-  # Input dilempar lewat env, bukan di-inline ke script shell (cegah injection)
-  BUILD_TYPE: ${{ github.event.inputs.build_type }}
-  COMPILER: ${{ github.event.inputs.compiler }}
-  REF_NAME: ${{ github.ref_name }}
-  ACTOR: ${{ github.actor }}
 
 jobs:
   Reforging:
+    name: Reforging - ${{ matrix.build_type }}
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [KSU-AOSP]
+
+    env:
+      KBUILD_BUILD_USER: Naughty-stuff
+      KBUILD_BUILD_HOST: LineageOS
+      BUILD_TYPE: ${{ matrix.build_type }}
+      REF_NAME: ${{ github.ref_name }}
+      BUILD_TIME: ${{ needs.tracker.outputs.build_time }}
 
     steps:
-    - name: 🔄 Checkout Code
-      uses: actions/checkout@v5
-      with:
-        submodules: recursive
-        fetch-depth: 1
-        persist-credentials: false
+      - name: 📥 Checkout Kernel
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
 
-    - name: ⏰ Prepare timezone
-      run: |
-        sudo ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
+      - name: ⏰ Prepare timezone
+        run: sudo ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
 
-    # PERHATIAN: dua step di bawah menjalankan script dari internet (branch bergerak).
-    # Idealnya ganti "refs/heads/..." / "main" dengan commit SHA yang sudah kamu cek isinya.
-    - name: 🥷 Implant NoMount
-      run: curl -fLSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -
+      - name: 📦 Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison cpio flex aria2 lz4 libssl-dev patchelf rsync zip unzip
 
-    - name: 📥 Setup KernelSU
-      run: curl -fLSs "https://raw.githubusercontent.com/manipvlator/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
+      - name: ⚙️ Setup Environment
+        run: |
+          set -e
+          # Nama branch bisa mengandung "/" atau karakter aneh, rapikan untuk nama file/artifact
+          SAFE_REF="$(printf '%s' "$REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"
+          echo "SAFE_REF=$SAFE_REF" >> "$GITHUB_ENV"
 
-    - name: 📦 Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          bc \
-          cpio \
-          flex \
-          bison \
-          git \
-          python-is-python3 \
-          tar \
-          aria2 \
-          perl \
-          wget \
-          curl \
-          lz4 \
-          libssl-dev \
-          libelf-dev \
-          dwarves \
-          zip \
-          zstd
+      - name: ⚙️ Setup Neutron Clang
+        run: |
+          mkdir -p "$HOME/toolchains/neutron-clang"
+          cd "$HOME/toolchains/neutron-clang"
+          curl -LO https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman
+          chmod +x antman
+          ./antman -S
+          ./antman --patch=glibc
 
-    - name: ⚙️ Setup Environment
-      shell: bash
-      run: |
-        set -e
-        BUILD_TIME="$(TZ=Asia/Jakarta date '+%d%m%Y-%H%M')"
-        # Nama branch bisa mengandung "/" atau karakter aneh, rapikan untuk nama file
-        SAFE_REF="$(printf '%s' "$REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"
-        # Label di nama zip: AOSP untuk build AOSP, OEM untuk build MIUI-OOS
-        if [[ "$BUILD_TYPE" == "AOSP" ]]; then
-          TYPE_TAG="AOSP"
-        else
-          TYPE_TAG="OEM"
-        fi
-        {
-          echo "BUILD_TIME=$BUILD_TIME"
-          echo "BUILD_DATE=$(TZ=Asia/Jakarta date '+%b %d %Y')"
-          echo "ARTIFACT_NAME=Reforge-sweet2-${TYPE_TAG}-${SAFE_REF}-${BUILD_TIME}"
-        } >> "$GITHUB_ENV"
+      - name: ⚙️ Setup GCC
+        run: |
+          git clone --depth=1 --branch main https://github.com/greenforce-project/gcc-arm64 gcc64
+          git clone --depth=1 --branch main https://github.com/greenforce-project/gcc-arm gcc32
 
-    - name: 🔧 Setup Compiler
-      id: compiler
-      shell: bash
-      run: |
-        set -euo pipefail
+      - name: 🔐 Setup KernelSU + NoMount
+        if: matrix.build_type == 'KSU-AOSP' || matrix.build_type == 'KSU-OEM'
+        run: |
+          curl -LSs https://raw.githubusercontent.com/LyraVoid/FinaSU/refs/heads/master/kernel/setup.sh | bash -s main
+          scripts/config --enable KSU
+          scripts/config --enable KPROBES
+          scripts/config --enable KALLSYMS_ALL
+          scripts/config --enable EXT4_FS
+          scripts/config --enable HEADERS_INSTALL
+          curl -LSs https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -
 
-        mkdir -p clang
+      - name: 📱 Patch Panel Dimensions
+        shell: bash
+        run: |
+          set -e
 
-        if [[ "$COMPILER" == "Neutron-Clang" ]]; then
+          apply_panel_dimensions() {
+              local w="$1"
+              local h="$2"
 
-          echo "Using Neutron Clang"
+              local files=(
+                  "arch/arm64/boot/dts/qcom/xiaomi/sweet/dsi-panel-k6-38-0e-0b-fhd-dsc-video.dtsi"
+                  "arch/arm64/boot/dts/qcom/xiaomi/sweet/dsi-panel-k6-38-0c-0a-fhd-dsc-video.dtsi"
+              )
 
-          CLANG_URL=$(
-            curl -fsSL \
-              https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest |
-            grep "browser_download_url" |
-            grep "neutron-clang" |
-            head -n 1 |
-            cut -d '"' -f 4
-          )
+              for f in "${files[@]}"; do
+                  if [[ -f "$f" ]]; then
 
-          [[ -n "$CLANG_URL" ]] || { echo "❌ URL Neutron Clang tidak ditemukan"; exit 1; }
+                      echo "Patching $f → ${w}x${h}"
 
-          echo "Downloading:"
-          echo "$CLANG_URL"
+                      sed -i \
+                        "s/\(qcom,mdss-pan-physical-width-dimension[[:space:]]*=[[:space:]]*< *\)[0-9]\+/\1${w}/" \
+                        "$f"
 
-          curl -fL "$CLANG_URL" -o neutron-clang.tar.zst
-          tar -C clang -xf neutron-clang.tar.zst
-          rm -f neutron-clang.tar.zst
+                      sed -i \
+                        "s/\(qcom,mdss-pan-physical-height-dimension[[:space:]]*=[[:space:]]*< *\)[0-9]\+/\1${h}/" \
+                        "$f"
+                  fi
+              done
+          }
 
-        else
-
-          echo "Using AOSP Clang"
-
-          CLANG_URL=$(
-            curl -fsSL \
-              https://api.github.com/repos/bachnxuan/aosp_clang_mirror/releases/latest |
-            grep "browser_download_url" |
-            grep -E 'clang-.*\.tar\.gz' |
-            head -n 1 |
-            cut -d '"' -f 4
-          )
-
-          [[ -n "$CLANG_URL" ]] || { echo "❌ URL AOSP Clang tidak ditemukan"; exit 1; }
-
-          echo "Downloading:"
-          echo "$CLANG_URL"
-
-          curl -fL "$CLANG_URL" -o clang.tar.gz
-          tar -C clang -xf clang.tar.gz
-          rm -f clang.tar.gz
-
-        fi
-
-        echo "CLANG_PATH=$GITHUB_WORKSPACE/clang" >> "$GITHUB_ENV"
-
-        echo
-        echo "Compiler:"
-        "$GITHUB_WORKSPACE/clang/bin/clang" --version | head -n 1
-        "$GITHUB_WORKSPACE/clang/bin/ld.lld" --version | head -n 1
-
-    - name: 📱 Patch Panel Dimensions
-      shell: bash
-      run: |
-        set -e
-
-        apply_panel_dimensions() {
-            local w="$1"
-            local h="$2"
-
-            local files=(
-                "arch/arm64/boot/dts/qcom/xiaomi/sweet/dsi-panel-k6-38-0e-0b-fhd-dsc-video.dtsi"
-                "arch/arm64/boot/dts/qcom/xiaomi/sweet/dsi-panel-k6-38-0c-0a-fhd-dsc-video.dtsi"
-            )
-
-            for f in "${files[@]}"; do
-                if [[ -f "$f" ]]; then
-
-                    echo "Patching $f → ${w}x${h}"
-
-                    sed -i \
-                      "s/\(qcom,mdss-pan-physical-width-dimension[[:space:]]*=[[:space:]]*< *\)[0-9]\+/\1${w}/" \
-                      "$f"
-
-                    sed -i \
-                      "s/\(qcom,mdss-pan-physical-height-dimension[[:space:]]*=[[:space:]]*< *\)[0-9]\+/\1${h}/" \
-                      "$f"
-                fi
-            done
-        }
-
-        if [[ "$BUILD_TYPE" == "AOSP" ]]; then
-            apply_panel_dimensions 69 156
-        else
-            apply_panel_dimensions 695 1546
-        fi
-
-    - name: 📨 Notify - Build Kernel Started
-      continue-on-error: true
-      shell: bash
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: |
-        if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-          echo "Secret Telegram belum diset, notifikasi dilewati."
-          exit 0
-        fi
-
-        TEXT="🛠️ *Reforge Kernel — Build Started*
-        📱 Device: \`${DEVICE_CODENAME}\`
-        📅 Build date: \`${BUILD_DATE}\`
-        ⚙️ Compiler: \`${COMPILER}\`
-        📦 Build type: \`${BUILD_TYPE}\`
-        👤 By: \`${ACTOR}\`"
-
-        curl -sS --fail-with-body -X POST \
-          "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-          --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-          --data-urlencode parse_mode="Markdown" \
-          --data-urlencode text="$TEXT" > /dev/null
-
-    - name: 🛠️ Build Kernel
-      id: build
-      shell: bash
-      run: |
-        set -e
-
-        export ARCH=arm64
-        export SUBARCH=arm64
-
-        export KBUILD_BUILD_USER=Ghnkz
-        export KBUILD_BUILD_HOST=LineageOS
-
-        export PATH="$CLANG_PATH/bin:$PATH"
-
-        export LLVM=1
-        export LLVM_IAS=1
-
-        export CC=clang
-        export LD=ld.lld
-
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
-
-        export KBUILD_COMPILER_STRING="$(clang --version | head -n1)"
-
-        echo "========================================="
-        echo "       Reforge Kernel Compilation"
-        echo "========================================="
-        echo "Build type : $BUILD_TYPE"
-        echo "Compiler   : $COMPILER"
-        echo "Date       : $BUILD_DATE"
-        echo "Jobs       : $(nproc --all)"
-        echo
-        clang --version | head -n1
-        echo "========================================="
-
-        make O=out ARCH=arm64 vendor/sweet_defconfig
-
-        make \
-          -j"$(nproc --all)" \
-          O=out \
-          ARCH=arm64
-
-        cp out/.config out/sweet_defconfig.txt
-
-    - name: ✅ Verify Kernel Build
-      id: verify
-      shell: bash
-      run: |
-        set -e
-
-        KERNEL="out/arch/arm64/boot/Image.gz"
-        DTBO="out/arch/arm64/boot/dtbo.img"
-        DTB="out/arch/arm64/boot/dtb.img"
-
-        failed=0
-
-        for file in "$KERNEL" "$DTBO" "$DTB"; do
-          if [[ ! -f "$file" ]]; then
-            echo "❌ Missing: $file"
-            failed=1
+          # KSU-OEM = dimensi OEM (MIUI/OOS); KSU-AOSP & Non-KSU = dimensi AOSP
+          if [[ "$BUILD_TYPE" == "KSU-OEM" ]]; then
+              apply_panel_dimensions 695 1546
           else
-            echo "✅ Found: $file"
-            ls -lh "$file"
+              apply_panel_dimensions 69 156
           fi
-        done
 
-        if [[ "$failed" -ne 0 ]]; then
-          echo "Kernel compilation failed."
-          exit 1
-        fi
+      - name: 🧩 Generate Defconfig
+        run: make O=out ARCH=arm64 vendor/sweet_defconfig
 
-    - name: 💾 Upload configs
-      uses: actions/upload-artifact@v5
-      with:
-        name: configs-${{ env.BUILD_TIME }}
-        path: out/sweet_defconfig.txt
+      - name: 🔨 Build Kernel
+        run: |
+          CLANG="$HOME/toolchains/neutron-clang"
+          GCC64="${GITHUB_WORKSPACE}/gcc64"
+          GCC32="${GITHUB_WORKSPACE}/gcc32"
+          export PATH="$CLANG/bin:$GCC64/bin:$GCC32/bin:$PATH"
+          export CFLAGS_EXTRA="-DBUILD_DATE=$(date +%s)"
 
-    - name: 📂 Clone AnyKernel3 & Zip
-      shell: bash
-      run: |
-        set -e
+          make -j"$(nproc --all)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang \
+            CLANG_TRIPLE="$CLANG/aarch64-linux-gnu-" \
+            CROSS_COMPILE="$GCC64/bin/aarch64-elf-" \
+            CROSS_COMPILE_ARM32="$GCC32/bin/arm-eabi-" \
+            KBUILD_BUILD_USER="$KBUILD_BUILD_USER" \
+            KBUILD_BUILD_HOST="$KBUILD_BUILD_HOST" \
+            KBUILD_COMPILER_STRING="Neutron clang version 24.0.0 \
+            KSU_REQUIRE_PREINIT=1"
+            
 
-        git clone \
-          --depth=1 \
-          https://github.com/Naughty-stuff/anykernel3.git \
-          AnyKernel3
+      - name: ✅ Verify FinaSU Integration
+        id: verify_finasu
+        shell: bash
+        run: |
+          set -euo pipefail
+  
+          echo "========================================="
+          echo "       FinaSU Kernel Verification"
+          echo "========================================="
+  
+          if [[ ! -L drivers/kernelsu ]]; then
+            echo "❌ FinaSU source symlink not found"
+            exit 1
+          fi
+  
+          FINASU_DIR="$(readlink -f drivers/kernelsu)"
+  
+          if [[ ! -f "$FINASU_DIR/Kconfig" || ! -f "$FINASU_DIR/Kbuild" ]]; then
+            echo "❌ Invalid FinaSU source directory"
+            exit 1
+          fi
+  
+          echo "✅ FinaSU source found: $FINASU_DIR"
+  
+          for option in KPROBES EXT4_FS KALLSYMS_ALL THREAD_INFO_IN_TASK KSU KSU_SUSFS KSU_DYNAMIC_MANAGER; do
+            if grep -qx "CONFIG_${option}=y" out/.config; then
+              echo "✅ CONFIG_${option}=y"
+            else
+              echo "❌ CONFIG_${option} is not enabled"
+              exit 1
+            fi
+          done
+  
+          if grep -qx 'CONFIG_KSU_DISABLE_MANAGER=y' out/.config; then
+            echo "❌ FinaSU Manager integration is disabled"
+            exit 1
+          fi
+  
+          if [[ ! -s out/drivers/kernelsu/kernelsu.o ]]; then
+            echo "❌ FinaSU kernel object was not compiled"
+            exit 1
+          fi
+  
+          echo "✅ FinaSU kernel object compiled successfully"
+          echo "========================================="
+        
+      - name: ✅ Verify Kernel Build
+        run: |
+          set -e
+          failed=0
+          for file in out/arch/arm64/boot/Image.gz out/arch/arm64/boot/dtbo.img out/arch/arm64/boot/dtb.img; do
+            if [[ ! -f "$file" ]]; then
+              echo "❌ Missing: $file"
+              failed=1
+            else
+              echo "✅ Found: $file"
+              ls -lh "$file"
+            fi
+          done
+          [[ "$failed" -eq 0 ]] || { echo "Kernel compilation failed."; exit 1; }
 
-        cp out/arch/arm64/boot/Image.gz AnyKernel3/Image.gz
-        cp out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
-        cp out/arch/arm64/boot/dtb.img AnyKernel3/dtb.img
+      - name: 📄 Save Defconfig
+        run: cp out/.config out/sweet_defconfig.txt
 
-        cd AnyKernel3
+      - name: 📂 Clone AnyKernel3 & Zip
+        shell: bash
+        run: |
+          set -e
 
-        zip -r9 \
-          "../${ARTIFACT_NAME}.zip" \
-          . \
-          -x ".git/*"
+          git clone \
+            --depth=1 \
+            https://github.com/Naughty-stuff/anykernel3.git \
+            AnyKernel3
 
-    - name: 📤 Upload Flashable Zip
-      uses: actions/upload-artifact@v5
-      with:
-        name: ${{ env.ARTIFACT_NAME }}
-        path: ${{ env.ARTIFACT_NAME }}.zip
+          cp out/arch/arm64/boot/Image.gz AnyKernel3/Image.gz
+          cp out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
+          cp out/arch/arm64/boot/dtb.img AnyKernel3/dtb.img
 
-    - name: 📨 Notify - Build Finished (with file)
-      continue-on-error: true
-      shell: bash
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      run: |
-        set -e
+          ZIP_NAME="reforge_${BUILD_TYPE}-${BUILD_TIME}.zip"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
 
-        if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-          echo "Secret Telegram belum diset, notifikasi dilewati."
-          exit 0
-        fi
+          cd AnyKernel3
+          zip -r9 "../${ZIP_NAME}" . -x ".git/*"
 
-        ZIP_FILE="${ARTIFACT_NAME}.zip"
+      - name: 📤 Upload ZIP Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: reforge_${{ matrix.build_type }}-${{ env.SAFE_REF }}-${{ env.BUILD_TIME }}
+          path: AnyKernel3/*
 
-        CAPTION="✅ *Reforge Kernel — Build Finished*
-        📱 Device: \`${DEVICE_CODENAME}\`
-        📅 Build date: \`${BUILD_DATE}\`
-        ⚙️ Compiler: \`${COMPILER}\`
-        📦 Build type: \`${BUILD_TYPE}\`
-        🌿 Branch: \`${REF_NAME}\`
-        👤 By: \`${ACTOR}\`"
-
-        if ! curl -sS --fail-with-body -X POST \
-          "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
-          -F chat_id="${TELEGRAM_CHAT_ID}" \
-          -F document=@"${ZIP_FILE}" \
-          -F caption="${CAPTION}" \
-          -F parse_mode="Markdown" > /dev/null; then
-
-          # Bot API membatasi upload 50 MB. Kalau gagal, kirim teks + link artifact.
-          echo "Upload file gagal, kirim notifikasi teks saja."
-          TEXT="${CAPTION}"$'\n'"📎 File ada di Artifacts: ${RUN_URL}"
-          curl -sS --fail-with-body -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-            --data-urlencode parse_mode="Markdown" \
-            --data-urlencode text="$TEXT" > /dev/null
-        fi
-
-    - name: ☁️ Upload ZIP to CDN
-      id: cdn
-      continue-on-error: true
-      shell: bash
-      run: |
-        set -e
-
-        ZIP_FILE="${ARTIFACT_NAME}.zip"
-
-        RESP="$(curl -sS --fail-with-body -X POST https://cdn.zass.in/upload \
-          -F "file=@${ZIP_FILE}")" || { echo "❌ Upload CDN gagal: $RESP"; exit 1; }
-
-        echo "Response CDN: $RESP"
-
-        # Ambil URL pertama dari response: coba sebagai JSON dulu, kalau bukan cari https:// biasa
-        URL="$(jq -r '.. | strings | select(test("^https?://"))' <<< "$RESP" 2>/dev/null | head -n 1 || true)"
-        if [[ -z "$URL" ]]; then
-          URL="$(grep -oE 'https?://[^"[:space:]\\]+' <<< "$RESP" | head -n 1 || true)"
-        fi
-
-        [[ -n "$URL" ]] || { echo "❌ URL tidak ditemukan di response CDN"; exit 1; }
-
-        echo "✅ CDN URL: $URL"
-        echo "url=$URL" >> "$GITHUB_OUTPUT"
-
-    - name: 📨 Notify Owner - CDN Link
-      if: steps.cdn.outputs.url != ''
-      continue-on-error: true
-      shell: bash
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
-        CDN_URL: ${{ steps.cdn.outputs.url }}
-      run: |
-        if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_OWNER_ID" ]]; then
-          echo "Secret TELEGRAM_OWNER_ID belum diset, kirim ke owner dilewati."
-          exit 0
-        fi
-
-        # Hanya terima URL http(s) tanpa spasi
-        if [[ ! "$CDN_URL" =~ ^https?://[^[:space:]]+$ ]]; then
-          echo "URL tidak valid, dilewati."
-          exit 0
-        fi
-
-        # Teks polos (tanpa parse_mode) supaya karakter di URL tidak merusak format
-        TEXT="🔗 Link download Reforge (${BUILD_TYPE})
-        📦 ${ARTIFACT_NAME}.zip
-        ${CDN_URL}"
-
-        curl -sS --fail-with-body -X POST \
-          "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-          --data-urlencode chat_id="${TELEGRAM_OWNER_ID}" \
-          --data-urlencode text="$TEXT" > /dev/null
-
-    - name: 🚨 Notify - Build Failed
-      if: failure()
-      continue-on-error: true
-      shell: bash
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        FAILED_STAGE: ${{ steps.compiler.outcome == 'failure' && 'Setup Compiler' || steps.build.outcome == 'failure' && 'Build Kernel' || steps.verify.outcome == 'failure' && 'Verify Kernel Build' || 'Step lain (cek log)' }}
-      run: |
-        if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-          echo "Secret Telegram belum diset, notifikasi dilewati."
-          exit 0
-        fi
-
-        TEXT="❌ *Reforge Kernel — Build FAILED*
-        📱 Device: \`${DEVICE_CODENAME}\`
-        📅 Build date: \`${BUILD_DATE}\`
-        ⚙️ Compiler: \`${COMPILER}\`
-        📦 Build type: \`${BUILD_TYPE}\`
-        🌿 Branch: \`${REF_NAME}\`
-        👤 By: \`${ACTOR}\`
-        🧩 Stage: \`${FAILED_STAGE}\`
-        🔗 Run: ${RUN_URL}"
-
-        curl -sS --fail-with-body -X POST \
-          "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-          --data-urlencode chat_id="${TELEGRAM_CHAT_ID}" \
-          --data-urlencode parse_mode="Markdown" \
-          --data-urlencode text="$TEXT" > /dev/null
+      - name: 📤 Upload Defconfig Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: configs-${{ matrix.build_type }}-${{ env.BUILD_TIME }}
+          path: out/sweet_defconfig.txt
