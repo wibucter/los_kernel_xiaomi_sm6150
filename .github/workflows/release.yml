@@ -63,14 +63,7 @@ jobs:
 
           echo "sha=$(jq -r '.head_sha' <<< "$run_data")" >> "$GITHUB_OUTPUT"
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v8
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ env.SOURCE_RUN_ID }}
-          path: artifacts
-
+      
       - name: Prepare release tag
         id: meta
         env:
@@ -84,6 +77,22 @@ jobs:
             echo "tag=build-$SOURCE_RUN_ID" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Download artifacts as ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ env.SOURCE_RUN_ID }}
+        shell: bash
+        run: |
+          mkdir -p artifacts
+
+          gh api "repos/${GH_REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | [.id, .name] | @tsv' |
+          while IFS=$'\t' read -r artifact_id artifact_name; do
+            gh api "repos/${GH_REPO}/actions/artifacts/${artifact_id}/zip" \
+              > "artifacts/${artifact_name}.zip"
+          done
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -93,4 +102,4 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            artifacts/**/*
+            artifacts/*.zip
