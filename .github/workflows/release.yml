@@ -1,0 +1,96 @@
+
+name: Publish Release
+
+on:
+  workflow_run:
+    workflows:
+      - Build
+    types:
+      - completed
+    branches:
+      - main
+
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "ID of the workflow run containing the artifacts"
+        required: true
+        type: string
+      tag_name:
+        description: "Release tag (optional, defaults to build-RUN_ID)"
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    env:
+      SOURCE_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.run_id }}
+
+    steps:
+      - name: Validate source workflow run
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ env.SOURCE_RUN_ID }}
+        shell: bash
+        run: |
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || exit 1
+
+          run_data="$(gh api "repos/${GH_REPO}/actions/runs/${RUN_ID}")"
+
+          if [[ "$(jq -r '.repository.full_name' <<< "$run_data")" != "$GH_REPO" ]]; then
+            echo "Workflow run belongs to another repository"
+            exit 1
+          fi
+
+          if [[ "$(jq -r '.status' <<< "$run_data")" != "completed" ]]; then
+            echo "Workflow run has not completed"
+            exit 1
+          fi
+
+          if [[ "$(jq -r '.conclusion' <<< "$run_data")" != "success" ]]; then
+            echo "Workflow run was not successful"
+            exit 1
+          fi
+
+          echo "sha=$(jq -r '.head_sha' <<< "$run_data")" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          path: artifacts
+
+      - name: Prepare release tag
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag_name }}
+          SOURCE_RUN_ID: ${{ env.SOURCE_RUN_ID }}
+        shell: bash
+        run: |
+          if [[ -n "$INPUT_TAG" ]]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=build-$SOURCE_RUN_ID" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ steps.source.outputs.sha }}
+          name: ${{ steps.meta.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/**/*
