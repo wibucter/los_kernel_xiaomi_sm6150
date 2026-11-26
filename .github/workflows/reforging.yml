@@ -5,111 +5,165 @@ on:
 
 jobs:
   Reforging:
+    name: Reforging - ${{ matrix.build_type }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        build_type: [KSU-AOSP, KSU-OEM, Non-KSU]
+        build_type: [KSU-AOSP]
+
+    env:
+      KBUILD_BUILD_USER: Naughty-stuff
+      KBUILD_BUILD_HOST: LineageOS
+      BUILD_TYPE: ${{ matrix.build_type }}
+      REF_NAME: ${{ github.ref_name }}
+      BUILD_TIME: ${{ needs.tracker.outputs.build_time }}
 
     steps:
-      - name: 🔄 Checkout Code
+      - name: 📥 Checkout Kernel
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
 
-      - name: ⏰ Prepare Environment
+      - name: ⏰ Prepare timezone
+        run: sudo ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
+
+      - name: 📦 Install Dependencies
         run: |
-          sudo ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
-          sudo apt update -y
-          sudo apt install -y bc cpio flex bison git python-is-python3 tar aria2 perl wget curl lz4 libssl-dev
+          sudo apt-get update
+          sudo apt-get install -y bc bison cpio flex aria2 lz4 libssl-dev patchelf rsync zip unzip
 
-          mkdir clang
-          cd clang
+      - name: ⚙️ Setup Environment
+        run: |
+          set -e
+          # Nama branch bisa mengandung "/" atau karakter aneh, rapikan untuk nama file/artifact
+          SAFE_REF="$(printf '%s' "$REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"
+          echo "SAFE_REF=$SAFE_REF" >> "$GITHUB_ENV"
+
+      - name: ⚙️ Setup Neutron Clang
+        run: |
+          mkdir -p "$HOME/toolchains/neutron-clang"
+          cd "$HOME/toolchains/neutron-clang"
           curl -LO https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman
           chmod +x antman
           ./antman -S
           ./antman --patch=glibc
-          cd ..
 
-          git clone --depth=1 -b main https://github.com/greenforce-project/gcc-arm64 gcc64
-          git clone --depth=1 -b main https://github.com/greenforce-project/gcc-arm gcc32
+      - name: ⚙️ Setup GCC
+        run: |
+          git clone --depth=1 --branch main https://github.com/greenforce-project/gcc-arm64 gcc64
+          git clone --depth=1 --branch main https://github.com/greenforce-project/gcc-arm gcc32
 
-          echo "BUILD_TIME=$(TZ=Asia/Jakarta date '+%d%m%Y-%H%M')" >> "$GITHUB_ENV"
-          echo "BUILD_DATE=\"$(TZ=Asia/Jakarta date '+%b %d %Y')\"" >> "$GITHUB_ENV"
-          echo "BUILD_REF=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
-          echo "CLANG_PATH=$GITHUB_WORKSPACE/clang" >> "$GITHUB_ENV"
-          echo "GCC64_PATH=$GITHUB_WORKSPACE/gcc64" >> "$GITHUB_ENV"
-          echo "GCC32_PATH=$GITHUB_WORKSPACE/gcc32" >> "$GITHUB_ENV"
-
-      - name: 🥷 Setup NoMount
-        run: curl -LSs https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/master/kernel/setup.sh | bash -s master
-
-      - name: 📥 Setup KernelSU
+      - name: 🔐 Setup KernelSU + NoMount
         if: matrix.build_type == 'KSU-AOSP' || matrix.build_type == 'KSU-OEM'
-        run: curl -LSs https://raw.githubusercontent.com/manipvlator/KernelSU/refs/heads/main/kernel/setup.sh | bash -s main
-
-      - name: 📐 OEM Dimension
-        if: matrix.build_type == 'KSU-OEM'
         run: |
-          DTS=arch/arm64/boot/dts/qcom/xiaomi/sweet/dsi-panel-k6-38-0c-0a-fhd-dsc-video.dtsi
-          sed -i \
-            -e 's/qcom,mdss-pan-physical-width-dimension = <69>;/qcom,mdss-pan-physical-width-dimension = <695>;/' \
-            -e 's/qcom,mdss-pan-physical-height-dimension = <154>;/qcom,mdss-pan-physical-height-dimension = <1546>;/' \
-            "$DTS"
+          curl -LSs https://raw.githubusercontent.com/manipvlator/KernelSU/refs/heads/main/kernel/setup.sh | bash -s main
+          curl -LSs https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh | bash -
 
-      - name: 🛠️ Build Kernel
+      - name: 📱 Patch Panel Dimensions
+        shell: bash
         run: |
-          export PATH="$CLANG_PATH/bin:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
-          export KBUILD_BUILD_USER=Manipulator
-          export KBUILD_BUILD_HOST=LineageOS
-          export KBUILD_COMPILER_STRING="Neutron clang version 24.0.0"
-          export CFLAGS_EXTRA="-DBUILD_DATE=$BUILD_DATE"
+          set -e
 
-          make O=out ARCH=arm64 vendor/sweet_defconfig
+          apply_panel_dimensions() {
+              local w="$1"
+              local h="$2"
+
+              local files=(
+                  "arch/arm64/boot/dts/qcom/xiaomi/sweet/dsi-panel-k6-38-0e-0b-fhd-dsc-video.dtsi"
+                  "arch/arm64/boot/dts/qcom/xiaomi/sweet/dsi-panel-k6-38-0c-0a-fhd-dsc-video.dtsi"
+              )
+
+              for f in "${files[@]}"; do
+                  if [[ -f "$f" ]]; then
+
+                      echo "Patching $f → ${w}x${h}"
+
+                      sed -i \
+                        "s/\(qcom,mdss-pan-physical-width-dimension[[:space:]]*=[[:space:]]*< *\)[0-9]\+/\1${w}/" \
+                        "$f"
+
+                      sed -i \
+                        "s/\(qcom,mdss-pan-physical-height-dimension[[:space:]]*=[[:space:]]*< *\)[0-9]\+/\1${h}/" \
+                        "$f"
+                  fi
+              done
+          }
+
+          # KSU-OEM = dimensi OEM (MIUI/OOS); KSU-AOSP & Non-KSU = dimensi AOSP
+          if [[ "$BUILD_TYPE" == "KSU-OEM" ]]; then
+              apply_panel_dimensions 695 1546
+          else
+              apply_panel_dimensions 69 156
+          fi
+
+      - name: 🧩 Generate Defconfig
+        run: make O=out ARCH=arm64 vendor/sweet_defconfig
+
+      - name: 🔨 Build Kernel
+        run: |
+          CLANG="$HOME/toolchains/neutron-clang"
+          GCC64="${GITHUB_WORKSPACE}/gcc64"
+          GCC32="${GITHUB_WORKSPACE}/gcc32"
+          export PATH="$CLANG/bin:$GCC64/bin:$GCC32/bin:$PATH"
+          export CFLAGS_EXTRA="-DBUILD_DATE=$(date +%s)"
+
           make -j"$(nproc --all)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang \
-            CLANG_TRIPLE="$CLANG_PATH/aarch64-linux-gnu-" \
-            CROSS_COMPILE="$GCC64_PATH/bin/aarch64-elf-" \
-            CROSS_COMPILE_ARM32="$GCC32_PATH/bin/arm-eabi-"
+            CLANG_TRIPLE="$CLANG/aarch64-linux-gnu-" \
+            CROSS_COMPILE="$GCC64/bin/aarch64-elf-" \
+            CROSS_COMPILE_ARM32="$GCC32/bin/arm-eabi-" \
+            KBUILD_BUILD_USER="$KBUILD_BUILD_USER" \
+            KBUILD_BUILD_HOST="$KBUILD_BUILD_HOST" \
+            KBUILD_COMPILER_STRING="Neutron clang version 24.0.0"
+            
 
-          cp out/.config out/sweet_defconfig.txt
 
-      - name: 💾 Upload Config
+      - name: ✅ Verify Kernel Build
+        run: |
+          set -e
+          failed=0
+          for file in out/arch/arm64/boot/Image.gz out/arch/arm64/boot/dtbo.img out/arch/arm64/boot/dtb.img; do
+            if [[ ! -f "$file" ]]; then
+              echo "❌ Missing: $file"
+              failed=1
+            else
+              echo "✅ Found: $file"
+              ls -lh "$file"
+            fi
+          done
+          [[ "$failed" -eq 0 ]] || { echo "Kernel compilation failed."; exit 1; }
+
+      - name: 📄 Save Defconfig
+        run: cp out/.config out/sweet_defconfig.txt
+
+      - name: 📂 Clone AnyKernel3 & Zip
+        shell: bash
+        run: |
+          set -e
+
+          git clone \
+            --depth=1 \
+            https://github.com/Naughty-stuff/anykernel3.git \
+            AnyKernel3
+
+          cp out/arch/arm64/boot/Image.gz AnyKernel3/Image.gz
+          cp out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
+          cp out/arch/arm64/boot/dtb.img AnyKernel3/dtb.img
+
+          ZIP_NAME="reforge_${BUILD_TYPE}-${BUILD_TIME}.zip"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+
+          cd AnyKernel3
+          zip -r9 "../${ZIP_NAME}" . -x ".git/*"
+
+      - name: 📤 Upload ZIP Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: reforge_${{ matrix.build_type }}-${{ env.SAFE_REF }}-${{ env.BUILD_TIME }}
+          path: AnyKernel3/*
+
+      - name: 📤 Upload Defconfig Artifact
         uses: actions/upload-artifact@v7
         with:
           name: configs-${{ matrix.build_type }}-${{ env.BUILD_TIME }}
           path: out/sweet_defconfig.txt
-
-      - name: 📦 Build 90Hz DTBO
-        run: |
-          cp out/arch/arm64/boot/dtb.img "$RUNNER_TEMP/dtb-stock.img"
-          cp out/arch/arm64/boot/dtbo.img "$RUNNER_TEMP/dtbo-stock.img"
-
-          git apply arch/arm64/boot/dts/qcom/xiaomi/sweet/90hz-dtbo.patch
-          rm -rf out/arch/arm64/boot/dts out/arch/arm64/boot/dtb.img out/arch/arm64/boot/dtbo.img
-
-          export PATH="$CLANG_PATH/bin:$GCC64_PATH/bin:$GCC32_PATH/bin:$PATH"
-          export KBUILD_BUILD_USER=Manipulator
-          export KBUILD_BUILD_HOST=LineageOS
-          export KBUILD_COMPILER_STRING="Neutron clang version 24.0.0"
-          export CFLAGS_EXTRA="-DBUILD_DATE=$BUILD_DATE"
-
-          make -j"$(nproc --all)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang \
-            CLANG_TRIPLE="$CLANG_PATH/aarch64-linux-gnu-" \
-            CROSS_COMPILE="$GCC64_PATH/bin/aarch64-elf-" \
-            CROSS_COMPILE_ARM32="$GCC32_PATH/bin/arm-eabi-"
-
-          cp out/arch/arm64/boot/dtbo.img "$RUNNER_TEMP/dtbo-90hz.img"
-          cp "$RUNNER_TEMP/dtb-stock.img" out/arch/arm64/boot/dtb.img
-          cp "$RUNNER_TEMP/dtbo-stock.img" out/arch/arm64/boot/dtbo.img
-          git apply -R arch/arm64/boot/dts/qcom/xiaomi/sweet/90hz-dtbo.patch
-
-      - name: 📂 Prepare AnyKernel3
-        run: |
-          git clone --depth=1 -b reforge https://github.com/manipvlator/Anykernel3.git AnyKernel3
-          cp out/arch/arm64/boot/{Image.gz,dtbo.img,dtb.img} AnyKernel3/
-          cp "$RUNNER_TEMP/dtbo-90hz.img" AnyKernel3/dtbo-90hz.img
-          (cd AnyKernel3 && zip -r "../reforge_${{ matrix.build_type }}-${BUILD_REF}-${BUILD_TIME}.zip" . -x ".git/*")
-
-      - name: 📤 Upload Flashable ZIP
-        uses: actions/upload-artifact@v7
-        with:
-          name: reforge_${{ matrix.build_type }}-${{ env.BUILD_REF }}-${{ env.BUILD_TIME }}
-          path: AnyKernel3/*
